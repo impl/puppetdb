@@ -609,7 +609,7 @@
               :params [value]}
 
              ["latest_report?"]
-             (let [latest-report-clause (format "resource_events.report_id %s (SELECT certnames.latest_report_id FROM certnames)"
+             (let [latest-report-clause (format "resource_events.report_id %s (SELECT latest_report_id FROM certname_reports_summary)"
                                                 (if value "IN" "NOT IN"))]
                {:where latest-report-clause
                 :latest-report-clause latest-report-clause})

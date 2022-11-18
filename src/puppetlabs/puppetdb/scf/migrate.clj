@@ -2044,6 +2044,29 @@
     "  PRIMARY KEY (workspace_uuid, certname),"
     "  FOREIGN KEY (workspace_uuid) REFERENCES workspaces(uuid) ON DELETE CASCADE)"]))
 
+(defn split-certnames-aux-fields
+  []
+  (jdbc/do-commands
+   ["create table certname_reports_summary ("
+    "  certname_id bigint not null primary key references certnames(id) on delete cascade,"
+    "  latest_report_id bigint not null unique,"
+    "  latest_report_timestamp timestamp with time zone not null)"]
+   ["create index idx_certname_reports_summary_latest_report_timestamp"
+    "  on certname_reports_summary"
+    "  using btree (latest_report_timestamp)"]
+   ["create table certname_packages_summary ("
+    "  certname_id bigint not null primary key references certnames(id) on delete cascade,"
+    "  package_hash bytea not null)"]
+   ["insert into certname_reports_summary (certname_id, latest_report_id, latest_report_timestamp)"
+    "  select id, latest_report_id, latest_report_timestamp from certnames"
+    "    where latest_report_id is not null and latest_report_timestamp is not null"]
+   "alter table certnames drop column latest_report_id"
+   "alter table certnames drop column latest_report_timestamp"
+   ["insert into certname_packages_summary (certname_id, package_hash)"
+    "  select id, package_hash from certnames"
+    "    where package_hash is not null"]
+   "alter table certnames drop column package_hash"))
+
 (def migrations
   "The available migrations, as a map from migration version to migration function."
   {00 require-schema-migrations-table
@@ -2107,7 +2130,8 @@
    77 add-catalog-inputs-pkey
    78 add-catalog-inputs-hash
    79 add-report-partition-indexes-on-certname-end-time
-   80 add-workspaces-tables})
+   80 add-workspaces-tables
+   81 split-certnames-aux-fields})
    ;; Make sure that if you change the structure of reports
    ;; or resource events, you also update the delete-reports
    ;; cli command.

@@ -1033,8 +1033,11 @@
 ;;; Packages
 
 (defn find-certname-id-and-hash [certname]
-  (first (jdbc/query-to-vec [(format "SELECT id, %s as package_hash FROM certnames WHERE certname=?"
-                                     (sutils/sql-hash-as-str "package_hash"))
+  (first (jdbc/query-to-vec [(format "select c.id, %s as package_hash
+                                      from certnames c
+                                      left join certname_packages_summary cps on cps.certname_id = c.id
+                                      where c.certname = ?"
+                                     (sutils/sql-hash-as-str "cps.package_hash"))
                              certname])))
 
 (defn create-package-map [certname-id]
@@ -1067,11 +1070,8 @@
                                      (get existing-hashes-map (pkg-util/package-tuple-hash hashed-package-tuple)))
                                    new-hashed-package-tuples)
         results (jdbc/insert-multi! :packages
-                                    (map (fn [[package_name version provider package-hash]]
-                                           {:name package_name
-                                            :version version
-                                            :provider provider
-                                            :hash (sutils/munge-hash-for-storage package-hash)})
+                                    [:name :version :provider :hash]
+                                    (map #(update-in % [3] sutils/munge-hash-for-storage)
                                          packages-to-create))]
     (merge existing-hashes-map
            (zipmap (map pkg-util/package-tuple-hash packages-to-create)
@@ -1093,10 +1093,13 @@
             new-package-id-set (set (vals full-hashes-map))
             [new-package-ids old-package-ids _] (clojure.data/diff new-package-id-set
                                                                    (package-id-set-for-certname certname_id))]
-        (jdbc/update! :certnames
-                      {:package_hash (when (seq inventory)
-                                       (sutils/munge-hash-for-storage new-package-hash))}
-                      ["id=?" certname_id])
+        (if (seq inventory)
+          (jdbc/do-prepared
+           (str "insert into certname_packages_summary (certname_id, package_hash)"
+                "  values (?, ?)"
+                "  on conflict (certname_id) do update set package_hash = excluded.package_hash")
+           [certname_id (sutils/munge-hash-for-storage new-package-hash)])
+          (jdbc/delete! :certname_packages_summary ["certname_id = ?" certname_id]))
 
         (when (seq new-package-ids)
           (jdbc/insert-multi! :certname_packages
@@ -1127,9 +1130,11 @@
         ;; a map of package hash to id in the packages table
         full-hashes-map (insert-missing-packages existing-package-hashes hashed-package-tuples)]
 
-    (jdbc/update! :certnames
-                  {:package_hash (sutils/munge-hash-for-storage new-packageset-hash)}
-                  ["id=?" certname-id])
+    (jdbc/do-prepared
+     (str "insert into certname_packages_summary (certname_id, package_hash)"
+          "  values (?, ?)"
+          "  on conflict (certname_id) do update set package_hash = excluded.package_hash")
+     [certname-id (sutils/munge-hash-for-storage new-packageset-hash)])
 
     (jdbc/insert-multi! :certname_packages
                         ["certname_id" "package_id"]
@@ -1148,10 +1153,12 @@
   [certname :- s/Str]
   (jdbc/query-with-resultset
    [(format "SELECT fs.id as factset_id, c.id as certname_id, %s as package_hash, fs.stable_hash as stable_hash
-             FROM factsets fs, certnames c
-             WHERE fs.certname = ? AND c.certname = ?"
-            (sutils/sql-hash-as-str "c.package_hash"))
-    certname certname]
+             FROM certnames c
+             JOIN factsets fs ON (c.certname = fs.certname)
+             LEFT JOIN certname_packages_summary cps on (c.id = cps.certname_id)
+             WHERE c.certname = ?"
+            (sutils/sql-hash-as-str "cps.package_hash"))
+    certname]
    (comp first sql/result-set-seq)))
 
 
@@ -1343,19 +1350,27 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Reports
 
-(defn update-latest-report!
-  "Given a node name, updates the `certnames` table to ensure that it indicates the
-   most recent report for the node."
-  [node report-id producer-timestamp]
-  {:pre [(string? node) (integer? report-id)]}
-
-  (jdbc/update! :certnames
+(pls/defn-validated update-latest-report!
+  "Upserts a record to the `certname_reports_summary` table for a
+   node to ensure that it indicates the most recent report for the
+   node."
+  [certname-id :- Long
+   report-id :- Long
+   producer-timestamp :- java.sql.Timestamp]
+  ;; This is executed inside a repeatable read transaction, so we sacrifice a
+  ;; round trip to avoid a RowExclusive lock.
+  (let [candidate-timestamp (jdbc/query-with-resultset
+                             ["select latest_report_timestamp from certname_reports_summary where certname_id = ?" certname-id]
+                             (comp :latest_report_timestamp first sql/result-set-seq))]
+    (cond
+      (nil? candidate-timestamp) (jdbc/insert! :certname_reports_summary
+                                               {:certname_id certname-id
+                                                :latest_report_id report-id
+                                                :latest_report_timestamp producer-timestamp})
+      (.after producer-timestamp candidate-timestamp) (jdbc/update! :certname_reports_summary
                 {:latest_report_id report-id
                  :latest_report_timestamp producer-timestamp}
-                [(str "certname = ?"
-                      " AND ( latest_report_timestamp < ?"
-                      "      OR latest_report_timestamp is NULL )")
-                 node producer-timestamp]))
+                                                                    ["certname_id = ?" certname-id]))))
 
 (defn find-containing-class
   "Given a containment path from Puppet, find the outermost 'class'."
@@ -1528,7 +1543,7 @@
                            (let [{:keys [file line]} @last-record]
                              (handle-resource-insert-sqlexception ex certname file line))))))
                    (when (and update-latest-report? (not= type "plan"))
-                     (update-latest-report! certname report-id producer_timestamp))
+                     (update-latest-report! certname-id report-id producer_timestamp))
                    {:status :incorporated :hash report-hash})))))))
 
 (defn maybe-log-query-termination
@@ -1722,11 +1737,11 @@
   ;; since we cannot cascade back to the certnames table anymore, go clean up
   ;; the latest_report_id column after a GC
   (jdbc/do-commands
-   ["UPDATE certnames SET latest_report_id = NULL"
-    "  WHERE certname IN"
-    "    (SELECT DISTINCT certnames.certname FROM certnames"
-    "       LEFT OUTER JOIN reports ON (reports.certname = certnames.certname)"
-    "       WHERE reports.id IS NULL)"]))
+   ["delete from certname_reports_summary"
+    "  where certname_id in ("
+    "    select certname_id from certname_reports_summary crs"
+    "    left join reports on (reports.id = crs.latest_report_id)"
+    "    where reports.id is null)"]))
 
 
 
@@ -1758,8 +1773,9 @@
                              "  union all (select producer_timestamp from factsets"
                              "               where certname = ?"
                              "               order by producer_timestamp desc limit 1)"
-                             "  union all (select latest_report_timestamp AS producer_timestamp from certnames"
-                             "               where certname = ? and latest_report_timestamp is not null)"
+                             "  union all (select crs.latest_report_timestamp AS producer_timestamp from certname_reports_summary crs"
+                             "               join certnames on (certnames.id = crs.certname_id)"
+                             "               where certnames.certname = ?)"
                              "  order by producer_timestamp desc"
                              "  limit 1")
                         (cons (repeat 3 certname))
@@ -1771,19 +1787,26 @@
 
 (pls/defn-validated maybe-activate-node!
   "Reactivate the given host, only if it was deactivated or expired before
-  `time`.  Returns true if the node is activated, or if it was already active.
+  `time`.  Returns true if the node is newly activated.
 
   Adds the host to the database if it was not already present."
   [certname :- String
    time :- pls/Timestamp]
-  (let [timestamp (to-timestamp time)]
-    (-> (jdbc/do-prepared
-         (str "insert into certnames (certname) values (?)"
-              "  on conflict (certname) do update set deactivated=null, expired=null"
-              "  where (certnames.deactivated < ? or certnames.expired < ?)")
-         [certname timestamp timestamp])
-        first
-        pos?)))
+  ;; This is executed inside a repeatable read transaction, so we sacrifice a
+  ;; round trip to avoid a RowExclusive lock.
+  (let [timestamp (to-timestamp time)
+        needs-activation (jdbc/query-with-resultset
+                          ["select coalesce(deactivated < ?, false) or coalesce(expired < ?, false) as needs_activation
+                            from certnames
+                            where certname = ?"
+                           timestamp timestamp certname]
+                          (comp :needs_activation first sql/result-set-seq))]
+    (cond
+      (nil? needs-activation) (add-certname! certname)
+      (true? needs-activation) (jdbc/update! :certnames
+                                             {:deactivated nil :expired nil}
+                                             ["certname = ?" certname]))
+    (not (false? needs-activation))))
 
 (pls/defn-validated deactivate-node!
   "Deactivate the given host, recording the current time. If the node is
@@ -1815,7 +1838,8 @@
            "    (select c.id from certnames c
                      left outer join catalogs cats on cats.certname = c.certname
                      left outer join factsets fs on c.certname = fs.certname
-                     left outer join reports r on c.latest_report_id = r.id
+                     left outer join certname_reports_summary crs on c.id = crs.certname_id
+                     left outer join reports r on crs.latest_report_id = r.id
                      left outer join certname_fact_expiration cfe on c.id = cfe.certid
                      left outer join catalog_inputs ci on c.id = ci.certname_id
                    where c.deactivated is null

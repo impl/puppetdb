@@ -337,35 +337,35 @@
                  "report_timestamp" {:type :timestamp
                                      :queryable? true
                                      :field :reports.end_time
-                                     :join-deps #{:reports}}
+                                     :join-deps #{:crs :reports}}
                  "latest_report_hash" {:type :string
                                        :queryable? true
                                        :field (hsql-hash-as-str :reports.hash)
-                                       :join-deps #{:reports}}
+                                       :join-deps #{:crs :reports}}
                  "latest_report_noop" {:type :boolean
                                        :queryable? true
                                        :field :reports.noop
-                                       :join-deps #{:reports}}
+                                       :join-deps #{:crs :reports}}
                  "latest_report_noop_pending" {:type :boolean
                                                :queryable? true
                                                :field :reports.noop_pending
-                                               :join-deps #{:reports}}
+                                               :join-deps #{:crs :reports}}
                  "latest_report_status" {:type :string
                                          :queryable? true
                                          :field :report_statuses.status
-                                         :join-deps #{:report_statuses :reports}}
+                                         :join-deps #{:crs :report_statuses :reports}}
                  "latest_report_corrective_change" {:type :boolean
                                                     :queryable? true
                                                     :field :reports.corrective_change
-                                                    :join-deps #{:reports}}
+                                                    :join-deps #{:crs :reports}}
                  "latest_report_job_id" {:type :string
                                          :queryable? true
                                          :field :reports.job_id
-                                         :join-deps #{:reports}}
+                                         :join-deps #{:crs :reports}}
                  "cached_catalog_status" {:type :string
                                           :queryable? true
                                           :field :reports.cached_catalog_status
-                                          :join-deps #{:reports}}
+                                          :join-deps #{:crs :reports}}
                  "catalog_environment" {:type :string
                                         :queryable? true
                                         :field :catalog_environment.environment
@@ -373,7 +373,7 @@
                  "report_environment" {:type :string
                                        :queryable? true
                                        :field :reports_environment.environment
-                                       :join-deps #{:reports_environment :reports}}}
+                                       :join-deps #{:crs :reports_environment :reports}}}
 
    :relationships certname-relations
 
@@ -386,10 +386,13 @@
                            [:factsets :fs]
                            [:= :certnames.certname :fs.certname]
 
+                           [:certname_reports_summary :crs]
+                           [:= :certnames.id :crs.certname_id]
+
                            :reports
                            [:and
                             [:= :certnames.certname :reports.certname]
-                            [:= :certnames.latest_report_id :reports.id]]
+                            [:= :crs.latest_report_id :reports.id]]
 
                            [:environments :catalog_environment]
                            [:= :catalog_environment.id :catalogs.environment_id]
@@ -1232,10 +1235,13 @@
                                                    :queryable? true
                                                    :field (hsql-hash-as-str :reports.hash)}}
                :selection {:from [:certnames]
-                           :join [:reports
+                           :join [[:certname_reports_summary :crs]
+                                  [:= :certnames.id :crs.certname_id]
+
+                                  :reports
                                   [:and
                                    [:= :certnames.certname :reports.certname]
-                                   [:= :certnames.latest_report_id :reports.id]]]}
+                                   [:= :crs.latest_report_id :reports.id]]]}
 
                :alias "latest_report"
                :subquery? false
@@ -1246,8 +1252,10 @@
   (map->Query {::which-query :latest-report-id
                :projections {"latest_report_id" {:type :numeric
                                                  :queryable? true
-                                                 :field :certnames.latest_report_id}}
-               :selection {:from [:certnames]}
+                                                 :field :crs.latest_report_id}}
+               :selection {:from [:certnames]
+                           :join [[:certname_reports_summary :crs]
+                                  [:= :certnames.id :crs.certname_id]]}
                :alias "latest_report_id"
                :subquery? false
                :source-tables #{:certnames}}))

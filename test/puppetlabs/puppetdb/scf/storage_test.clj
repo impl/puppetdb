@@ -1526,7 +1526,7 @@
       (is (not (have-newer-record-for-certname? certname now-sql))))
 
     (testing "should identify newer record with no reports"
-      ;; this tests that the function handles a null entry in certnames.latest_report_timestamp
+      ;; this tests that the function handles no data in certname_reports_summary
       (add-certname! certname)
       (replace-catalog! (assoc (:basic catalogs)
                                :certname certname
@@ -1744,16 +1744,20 @@
            ["node1" "node3"]))))
 
 (deftest-db report-sweep-nullifies-latest-report
-  (testing "ensure that if the latest report is swept, latest_report_id is updated to nil"
+  (testing "ensure that if the latest report is swept, the report summary for the certname is removed"
     (let [report1 (assoc (:basic reports) :end_time (-> 12 days ago))
           report2 (assoc (:basic reports) :certname "bar.local" :end_time (now) :producer_timestamp (now))]
       (add-certname! "foo.local")
       (add-certname! "bar.local")
       (store-example-report! report1 (-> 12 days ago))
       (store-example-report! report2 (now))
-      (let [ids (map :latest_report_id (query-to-vec "select latest_report_id from certnames order by certname"))
+      (let [query "select latest_report_id
+                   from certnames
+                   left join certname_reports_summary on (certnames.id = certname_reports_summary.certname_id)
+                   order by certname"
+            ids (map :latest_report_id (query-to-vec query))
             _ (delete-reports-older-than! {:report-ttl (-> 11 days ago)})
-            ids2 (map :latest_report_id (query-to-vec "select latest_report_id from certnames order by certname"))]
+            ids2 (map :latest_report_id (query-to-vec query))]
         (is (= ids2 [(first ids) nil]))))))
 
 (deftest-db plan-report-does-not-update-latest-report-id
@@ -1766,9 +1770,10 @@
                              :type "plan")]
       (add-certname! "foo.local")
       (store-example-report! agent-report (now))
-      (let [latest_report_id (query-to-vec "select latest_report_id from certnames")]
+      (let [latest_report_id (query-to-vec "select latest_report_id from certname_reports_summary")]
+        (is (not (nil? latest_report_id)))
         (store-example-report! plan-report (now))
-        (is (= latest_report_id (query-to-vec "select latest_report_id from certnames")))))))
+        (is (= latest_report_id (query-to-vec "select latest_report_id from certname_reports_summary")))))))
 
 ;; Report tests
 
@@ -1811,7 +1816,7 @@
     ;; to catch the error and create the partition on-demand
     (jdbc/do-commands
       "BEGIN TRANSACTION"
-      "UPDATE certnames SET latest_report_id = NULL"
+      "TRUNCATE TABLE certname_reports_summary"
       "DO $$ DECLARE
            r RECORD;
        BEGIN

@@ -90,7 +90,7 @@ fi
 cat > "$tmp_dir/delete_reports.sql" <<"DELETE"
 BEGIN TRANSACTION;
 
-UPDATE certnames SET latest_report_id = NULL;
+TRUNCATE TABLE certname_reports_summary;
 
 DO $$ DECLARE
     r RECORD;

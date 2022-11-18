@@ -10,7 +10,7 @@
 ; This MUST match the SQL run by resources/ext/cli/delete-reports.erb
 (def delete-reports-sql-commands
   ["BEGIN TRANSACTION"
-   "UPDATE certnames SET latest_report_id = NULL"
+   "TRUNCATE TABLE certname_reports_summary"
    "DO $$ DECLARE
         r RECORD;
     BEGIN

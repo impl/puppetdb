@@ -139,12 +139,15 @@
   (let [{:keys [transaction?]} (merge {:transaction? true}
                                       (when (map? db) db)
                                       opts)
-        sql-params (insert-multi-row table cols values opts)]
-    (if (sql/db-find-connection db)
-      (sql/db-do-prepared db transaction? sql-params {:multi? true})
-      (with-open [con (sql/get-connection db)]
-        (sql/db-do-prepared (sql/add-connection db con) transaction?
-                            sql-params {:multi? true})))))
+        db-do-prepared (if (:return-keys opts)
+                         sql/db-do-prepared-return-keys
+                         sql/db-do-prepared)]
+    (sql/with-db-connection [con db]
+      (->> values
+           (partition 1000 1000 nil)
+           (map #(insert-multi-row table cols % opts))
+           (map #(db-do-prepared con transaction? % {:multi? true}))
+           flatten))))
 
 (defn- multi-insert-helper
   "Given a (connected) database connection and some SQL
@@ -199,7 +202,7 @@
   ([table cols-or-rows values-or-opts]
    (if (map? values-or-opts)
      (insert-rows! *db* table cols-or-rows values-or-opts)
-     (insert-cols! *db* table cols-or-rows values-or-opts {})))
+     (insert-cols! *db* table cols-or-rows values-or-opts {:return-keys true})))
   ([table cols values opts]
    (sql/insert-multi! *db* table cols values opts)))
 

@@ -73,3 +73,9 @@ checkouts
 *.csv
 *report.html
 locust/load-test/__pycache__/
+
+# Test harness
+*-pdbbox-*/
+core-test-*/
+int-test-*/
+normal-tests-*/
